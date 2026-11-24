@@ -50,18 +50,21 @@ than `./data/bot.sqlite3`.
   **My playlists**.
 - In a playlist, tap **Add songs**, reply with a song or artist, and tap one
   of SoulSync’s search results to add it.
-- Use **Import from Spotify** or `/import`. Paste a public
-  `https://open.spotify.com/playlist/…` link, preview the songs, then create an
-  editable playlist or add them to an existing one. This is a one-time copy.
-  SoulSync skips duplicate songs and the bot reports what it added.
+- Use **Import playlist** or `/import`. Paste a public Spotify or Deezer
+  playlist URL, preview the songs, then create an editable playlist or add them
+  to an existing one. This is a one-time copy. SoulSync skips duplicate songs
+  and the bot reports what it added. For a shortened Deezer share link, open it
+  in a browser and paste the resulting `deezer.com/playlist/…` URL.
 - Open a playlist and confirm **Sync & download**. SoulSync updates the media
   server and queues missing songs using its existing configuration.
 - Use `/cancel` to leave a reply prompt and `/help` to see the workflow again.
 
-Spotify import uses the Spotify integration configured in SoulSync. It
-requires a public playlist and rejects responses marked incomplete or whose
-reported totals disagree. The default import limit is 1,000 songs. Set
-`SPOTIFY_IMPORT_MAX_TRACKS` to a value from 1 to 5,000 to change it. Search
+Spotify import uses the Spotify integration configured in SoulSync. Deezer
+import uses SoulSync’s public playlist loader. The bot rejects incomplete imports
+and applies the same 1,000-song default limit to both providers. Set
+`SPOTIFY_IMPORT_MAX_TRACKS` to a value from 1 to 5,000 to change it. If loading a
+large Deezer playlist times out, increase `SOULSYNC_IMPORT_TIMEOUT_SECONDS`.
+Search
 uses Spotify by default and can use `deezer`, `itunes`, or `musicbrainz`
 through `SOULSYNC_SEARCH_SOURCE`.
 

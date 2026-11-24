@@ -35,16 +35,29 @@ def finite(value: Any) -> TypeGuard[int | float]:
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def spotify_playlist_id(text: str) -> str:
+def playlist_link(text: str) -> tuple[str, str]:
     if len(text) <= 2048 and not re.search(r"[\x00-\x1f\x7f]", text):
         try:
             url = urlsplit(text.strip())
-            match = re.fullmatch(r"/playlist/([A-Za-z0-9]{10,64})/?", url.path)
-            if url.scheme == "https" and url.netloc.lower() == "open.spotify.com" and match:
-                return match[1]
         except ValueError:
-            pass
-    raise SoulSyncError("Paste an https://open.spotify.com/playlist/… link.")
+            url = None
+        if url and url.scheme == "https":
+            host = url.netloc.lower()
+            if host == "open.spotify.com":
+                if match := re.fullmatch(r"/playlist/([A-Za-z0-9]{10,64})/?", url.path):
+                    return "spotify", match[1]
+            elif host in {"deezer.com", "www.deezer.com"}:
+                if match := re.fullmatch(
+                    r"/(?:[a-z]{2}(?:-[a-z]{2})?/)?playlist/([1-9][0-9]{0,19})/?",
+                    url.path,
+                    re.IGNORECASE,
+                ):
+                    return "deezer", match[1]
+            elif host in {"link.deezer.com", "deezer.page.link"}:
+                raise SoulSyncError(
+                    "Open the Deezer share link in a browser and paste the deezer.com/playlist/… address."
+                )
+    raise SoulSyncError("Paste a public Spotify or Deezer playlist link.")
 
 
 def track_key(artist: str, title: str) -> tuple[str, str]:
@@ -92,7 +105,7 @@ def normalize_track(row: Any, source: str, *, imported: bool = False) -> Row | N
         "source": source,
         "source_id": sid,
     }
-    image = row.get("image_url")
+    image = row.get("image_url") or row.get("album_cover_url")
     if not image and isinstance(album, dict):
         images = album.get("images")
         if isinstance(images, list) and images and isinstance(images[0], dict):
@@ -233,27 +246,70 @@ class SoulSync:
                     "SoulSync could not open this public Spotify playlist."
                 ) from None
             raise
-        rows = data.get("tracks")
-        count, expected = data.get("track_count"), data.get("expected_total")
-        name = clean(data.get("name"))
-        if data.get("id") != source_id or not name or not isinstance(rows, list):
-            raise SoulSyncError(INCOMPATIBLE)
         if data.get("public") is not True:
             raise SoulSyncError("Choose a public Spotify playlist.")
-        if (
-            data.get("incomplete") is not False
-            or not integer(count)
-            or count != len(rows)
-            or (expected is not None and (not integer(expected) or expected != count))
+        expected = data.get("expected_total")
+        if data.get("incomplete") is not False or (
+            expected is not None and (not integer(expected) or expected != data.get("track_count"))
         ):
+            raise SoulSyncError("SoulSync could not verify the full playlist. Try again later.")
+        return self._playlist_preview(data, source_id, "spotify_public")
+
+    async def deezer(self, source_id: str) -> Preview:
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", source_id):
+            raise SoulSyncError("Invalid Deezer playlist ID.")
+        try:
+            async with asyncio.timeout(self.import_timeout):
+                data = await self._request(
+                    "GET", f"/api/deezer/playlist/{source_id}", params={"async": "1"}, long=True
+                )
+                if data.get("pending") is True:
+                    data = await self._deezer_playlist_job(data, source_id)
+        except TimeoutError:
+            raise SoulSyncError(
+                "SoulSync took too long to load this Deezer playlist. Try again later."
+            ) from None
+        except SoulSyncError as exc:
+            if exc.status == 404:
+                raise SoulSyncError(
+                    "SoulSync could not load this Deezer playlist. Check that it is public."
+                ) from None
+            raise
+        return self._playlist_preview(data, source_id, "deezer")
+
+    async def _deezer_playlist_job(self, initial: Row, source_id: str) -> Row:
+        job = initial.get("job_id")
+        if (
+            not isinstance(job, str)
+            or not re.fullmatch(r"deezer_playlist_[0-9a-f]{12}", job)
+            or str(initial.get("playlist_id")) != source_id
+        ):
+            raise SoulSyncError(INCOMPATIBLE)
+        while True:
+            data = await self._request("GET", f"/api/deezer/playlist-load/{job}")
+            if data.get("job_id") != job or str(data.get("playlist_id")) != source_id:
+                raise SoulSyncError(INCOMPATIBLE)
+            status = data.get("status")
+            if status == "complete" and isinstance(data.get("playlist"), dict):
+                return data["playlist"]
+            if status == "error":
+                raise SoulSyncError(
+                    "SoulSync could not load this Deezer playlist. Check that it is public."
+                )
+            if status not in ("queued", "running"):
+                raise SoulSyncError(INCOMPATIBLE)
+            await asyncio.sleep(1.5)
+
+    def _playlist_preview(self, data: Row, source_id: str, source: str) -> Preview:
+        rows, count = data.get("tracks"), data.get("track_count")
+        name = clean(data.get("name"))
+        if str(data.get("id")) != source_id or not name or not isinstance(rows, list):
+            raise SoulSyncError(INCOMPATIBLE)
+        if not integer(count) or count != len(rows):
             raise SoulSyncError("SoulSync could not verify the full playlist. Try again later.")
         if len(rows) > self.max_tracks:
             raise SoulSyncError(f"This import exceeds the {self.max_tracks:,}-track limit.")
-        tracks = [
-            track
-            for row in rows
-            if (track := normalize_track(row, "spotify_public", imported=True))
-        ]
+        tracks = [track for row in rows if (track := normalize_track(row, source, imported=True))]
         if not tracks:
             raise SoulSyncError("This playlist has no importable songs.")
         if len(json.dumps(tracks, ensure_ascii=False).encode()) > 2 * 1024**2:

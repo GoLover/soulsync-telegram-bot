@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from soulsync_tg_bot.config import Config
-from soulsync_tg_bot.soulsync import SoulSync, SoulSyncError, spotify_playlist_id, track_key
+from soulsync_tg_bot.soulsync import SoulSync, SoulSyncError, playlist_link, track_key
 
 SPOTIFY_ID = "37i9dQZF1DXcBWIGoYBM5M"
 SONG = {
@@ -37,16 +37,20 @@ def test_config_requires_numeric_allowlist():
         "https://open.spotify.com:443/playlist/" + SPOTIFY_ID,
         "https://open.spotify.com/album/" + SPOTIFY_ID,
         "https://open.spotify.com/playlist/%33" + SPOTIFY_ID[1:],
+        "https://deezer.com.example.org/playlist/123456",
+        "https://deezer.com@host.example.org/playlist/123456",
+        "https://www.deezer.com/en/album/123456",
     ],
 )
-def test_rejects_unsupported_spotify_urls(url):
+def test_rejects_unsupported_playlist_urls(url):
     with pytest.raises(SoulSyncError):
-        spotify_playlist_id(url)
+        playlist_link(url)
 
 
 def test_spotify_share_url_and_duplicate_key():
-    assert (
-        spotify_playlist_id(f"https://open.spotify.com/playlist/{SPOTIFY_ID}?si=abc") == SPOTIFY_ID
+    assert playlist_link(f"https://open.spotify.com/playlist/{SPOTIFY_ID}?si=abc") == (
+        "spotify",
+        SPOTIFY_ID,
     )
     assert track_key("The Beyoncé & Jay-Z", "Déjà Vu (Live) - Edit") == ("beyonce", "deja vu")
 
@@ -107,6 +111,29 @@ async def test_spotify_fetch_and_copy_contract(patch):
         else:
             preview = await api.spotify(SPOTIFY_ID)
             assert (await api.add(7, preview.tracks)).added == 1
+
+
+@pytest.mark.asyncio
+async def test_deezer_rejects_incomplete_playlist():
+    def server(request):
+        assert request.method == "GET"
+        assert request.url.path == "/api/deezer/playlist/123456"
+        return httpx.Response(
+            200,
+            json={
+                "id": "123456",
+                "name": "Mix",
+                "owner": "me",
+                "track_count": 2,
+                "tracks": [SONG],
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="http://soulsync", transport=httpx.MockTransport(server)
+    ) as http:
+        with pytest.raises(SoulSyncError, match="verify the full playlist"):
+            await SoulSync(http, "key").deezer("123456")
 
 
 @pytest.mark.asyncio

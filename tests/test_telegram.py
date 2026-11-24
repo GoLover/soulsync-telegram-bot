@@ -123,14 +123,53 @@ class ChatDriver:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("destination", ["new", "existing"])
-async def test_import_via_telegram_buttons_and_allowlist(tmp_path, destination):
+@pytest.mark.parametrize("provider", ["spotify", "deezer"])
+async def test_import_via_telegram_buttons_and_allowlist(tmp_path, destination, provider):
     telegram = RecordingTelegram()
     writes = []
     tracks = []
 
     def server(req):
         route = req.url.path
+        if route == "/api/deezer/playlist/123456":
+            assert provider == "deezer"
+            assert req.url.params["async"] == "1"
+            return httpx.Response(
+                202,
+                json={
+                    "pending": True,
+                    "job_id": "deezer_playlist_123abc456def",
+                    "playlist_id": "123456",
+                    "status": "queued",
+                },
+            )
+        if route == "/api/deezer/playlist-load/deezer_playlist_123abc456def":
+            return httpx.Response(
+                200,
+                json={
+                    "job_id": "deezer_playlist_123abc456def",
+                    "playlist_id": "123456",
+                    "status": "complete",
+                    "playlist": {
+                        "id": "123456",
+                        "name": "Road Trip",
+                        "owner": "me",
+                        "track_count": 1,
+                        "tracks": [
+                            {
+                                "id": "42",
+                                "name": "Time",
+                                "artists": ["Pink Floyd"],
+                                "album": "The Dark Side of the Moon",
+                                "duration_ms": 413000,
+                                "album_cover_url": "https://cdn.example.com/cover.jpg",
+                            }
+                        ],
+                    },
+                },
+            )
         if route == f"/api/spotify/playlist/{SPOTIFY_ID}":
+            assert provider == "spotify"
             return httpx.Response(
                 200,
                 json={
@@ -147,6 +186,18 @@ async def test_import_via_telegram_buttons_and_allowlist(tmp_path, destination):
         if req.method == "POST":
             writes.append(route)
             tracks.extend(json.loads(req.content)["tracks"])
+            if provider == "deezer":
+                assert tracks == [
+                    {
+                        "track_name": "Time",
+                        "artist_name": "Pink Floyd",
+                        "album_name": "The Dark Side of the Moon",
+                        "duration_ms": 413000,
+                        "source": "deezer",
+                        "source_id": "42",
+                        "image_url": "https://cdn.example.com/cover.jpg",
+                    }
+                ]
             return httpx.Response(
                 200, json={"success": True, "id": 7, "added": 1, "duplicates": [], "track_count": 1}
             )
@@ -171,8 +222,14 @@ async def test_import_via_telegram_buttons_and_allowlist(tmp_path, destination):
             driver = ChatDriver(app, telegram)
             await driver.update(user=42, text="/start")
             assert "denied" in telegram.messages[telegram.last[42]]["text"].lower()
-            await driver.update(text="/import")
-            await driver.reply(f"https://open.spotify.com/playlist/{SPOTIFY_ID}?si=secret")
+            await driver.update(text="/start")
+            await driver.tap("Import playlist")
+            link = (
+                f"https://open.spotify.com/playlist/{SPOTIFY_ID}?si=secret"
+                if provider == "spotify"
+                else "https://www.deezer.com/en-us/playlist/123456?utm_source=share"
+            )
+            await driver.reply(link)
             if destination == "new":
                 await driver.tap("Create new playlist")
             else:

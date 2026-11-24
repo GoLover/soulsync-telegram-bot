@@ -23,14 +23,14 @@ from .config import Config
 from .db import WEEK, Database
 from .operations import Operations
 from .screens import Button, Screen, clip, home, operation_result, pager, safe, track_lines
-from .soulsync import Row, SoulSync, SoulSyncError, clean, spotify_playlist_id
+from .soulsync import Row, SoulSync, SoulSyncError, clean, playlist_link
 from .telegram_ui import show
 
 LOG = logging.getLogger(__name__)
 COMMANDS = {
     "start": "Open the menu",
     "playlists": "Browse shared playlists",
-    "import": "Copy a public Spotify playlist",
+    "import": "Copy a public Spotify or Deezer playlist",
     "cancel": "Leave the current prompt",
     "help": "How to use this bot",
 }
@@ -94,11 +94,13 @@ class Controller:
         prompts = {
             "create": ("Name your playlist.", "Playlist name"),
             "search": ("What song are you looking for?", "Artist or song title"),
-            "spotify": (
-                "Paste a public Spotify playlist link. This copies the songs once.",
-                "https://open.spotify.com/playlist/…",
+            "import": (
+                "Paste a public Spotify or Deezer playlist link. This copies the songs once.",
+                "Spotify or Deezer playlist link",
             ),
         }
+        if kind == "spotify":  # Prompts saved by the Spotify-only bot.
+            kind = "import"
         text, placeholder = prompts[kind]
         if params.get("name"):
             text = f"{clip(params['name'])}\n{text}"
@@ -210,7 +212,7 @@ class Controller:
                 Screen(
                     "<b>How to use SoulSync</b>\n"
                     "Open My playlists or create a playlist. Choose Add songs, then tap a search "
-                    "result to add it. Use /import to copy songs from a public Spotify playlist. "
+                    "result to add it. Use /import to copy a public Spotify or Deezer playlist. "
                     "When ready, open the playlist and choose Sync &amp; download.\n\n"
                     "/cancel leaves a text prompt. Ask the bot operator for access or setup help.",
                     [[Button("Menu", "home")]],
@@ -218,7 +220,7 @@ class Controller:
             )
         else:
             await self.route(
-                chat, {"start": "home", "playlists": "list", "import": "spotify"}[name], {}
+                chat, {"start": "home", "playlists": "list", "import": "import"}[name], {}
             )
 
     async def input(self, chat: Chat, text: str, reply: int | None) -> None:
@@ -229,7 +231,9 @@ class Controller:
             await chat.bot.send_message(chat.id, "Reply to the latest bot prompt, or use /cancel.")
             return
         kind, context = session["prompt"], session["context"]
-        text = clean(text) if kind != "spotify" else text
+        if kind == "spotify":
+            kind = "import"
+        text = clean(text) if kind != "import" else text
         if kind == "create":
             if not 0 < len(text) <= 200:
                 raise SoulSyncError("Enter a playlist name between 1 and 200 characters.")
@@ -249,22 +253,27 @@ class Controller:
                 chat.user, "search", context | {"tracks": tracks, "query": text}, 1800
             )
             await self.search_results(chat, sid, 0)
-        elif kind == "spotify":
-            source = spotify_playlist_id(text)
-            preview = asdict(await self.api.spotify(source))
+        elif kind == "import":
+            provider, source_id = playlist_link(text)
+            playlist = await (
+                self.api.spotify(source_id) if provider == "spotify" else self.api.deezer(source_id)
+            )
+            preview = asdict(playlist) | {"provider": provider}
             sid = self.db.snapshot(
                 chat.user,
-                "spotify",
+                "import",
                 preview
                 | {
                     "preselected": context.get("playlist_id"),
                 },
                 7200,
             )
-            await self.spotify_preview(chat, sid, preview)
+            await self.import_preview(chat, sid, preview)
 
     def snapshot(self, chat: Chat, kind: str, value: str) -> Row:
         result = self.db.load_snapshot(chat.user, kind, value)
+        if result is None and kind == "import":
+            result = self.db.load_snapshot(chat.user, "spotify", value)
         if not result:
             raise SoulSyncError("This preview expired. Start a fresh search or import.")
         return result
@@ -276,7 +285,7 @@ class Controller:
             await self.screen(chat, home())
         elif action in {"list", "destinations"}:
             await self.playlist_list(chat, page, data.get("snapshot"))
-        elif action in {"create", "spotify", "search"}:
+        elif action in {"create", "import", "spotify", "search"}:
             await self.prompt(chat, action, data)
         elif action == "view":
             await self.playlist_detail(chat, data["playlist_id"], page)
@@ -298,11 +307,11 @@ class Controller:
             )
         elif action == "preview":
             sid = data["snapshot"]
-            await self.spotify_preview(chat, sid, self.snapshot(chat, "spotify", sid))
+            await self.import_preview(chat, sid, self.snapshot(chat, "import", sid))
         elif action == "destination":
             await self.import_confirm(chat, data["snapshot"], pid)
         elif action == "copy":
-            snap = self.snapshot(chat, "spotify", data["snapshot"])
+            snap = self.snapshot(chat, "import", data["snapshot"])
             await self.begin(
                 chat,
                 action_id,
@@ -324,7 +333,7 @@ class Controller:
                 await self.begin(chat, action_id, "pipeline", data)
 
     async def playlist_list(self, chat: Chat, page: int, sid: str | None) -> None:
-        snap = self.snapshot(chat, "spotify", sid) if sid else {}
+        snap = self.snapshot(chat, "import", sid) if sid else {}
         rows = await self.api.playlists()
         rows.sort(
             key=lambda row: (
@@ -355,7 +364,7 @@ class Controller:
         else:
             buttons += [
                 [Button("Create playlist", "create", style="primary" if not rows else None)],
-                [Button("Import from Spotify", "spotify")],
+                [Button("Import playlist", "import")],
                 [Button("Back", "home")],
             ]
         title = "Choose a destination" if sid else "My playlists"
@@ -388,7 +397,7 @@ class Controller:
                 text,
                 [
                     [Button("Add songs", "search", params, "primary")],
-                    [Button("Import Spotify here", "spotify", params)],
+                    [Button("Import playlist", "import", params)],
                     [Button("View sync status" if active else "Sync & download", "sync", params)]
                     if tracks
                     else [],
@@ -429,9 +438,10 @@ class Controller:
         ]
         await self.screen(chat, Screen(text, rows))
 
-    async def spotify_preview(self, chat: Chat, sid: str, snap: Row) -> None:
+    async def import_preview(self, chat: Chat, sid: str, snap: Row) -> None:
         tracks, skipped = snap["tracks"], snap["skipped"]
-        text = f"<b>{safe(snap['name'])}</b>\n{len(tracks):,} importable songs"
+        provider = "Deezer" if snap.get("provider") == "deezer" else "Spotify"
+        text = f"<b>{safe(snap['name'])}</b>\n{provider} · {len(tracks):,} importable songs"
         if snap.get("owner"):
             text += f" · {safe(snap['owner'], 60)}"
         if skipped:
@@ -454,14 +464,14 @@ class Controller:
             [Button("Create new playlist", "destination", params)],
             [Button("Add to existing", "destinations", params)],
             [
-                Button("Back", "spotify", {"playlist_id": snap.get("preselected")}),
+                Button("Back", "import", {"playlist_id": snap.get("preselected")}),
                 Button("Menu", "home"),
             ],
         ]
         await self.screen(chat, Screen(text, buttons))
 
     async def import_confirm(self, chat: Chat, sid: str, pid: int | None) -> None:
-        snap = self.snapshot(chat, "spotify", sid)
+        snap = self.snapshot(chat, "import", sid)
         name = snap["name"][:200]
         if pid is not None:
             detail = await self.api.detail(pid)
@@ -470,7 +480,7 @@ class Controller:
         await self.screen(
             chat,
             Screen(
-                f"<b>Import from Spotify</b>\nCopy {len(snap['tracks']):,} songs from "
+                f"<b>Import playlist</b>\nCopy {len(snap['tracks']):,} songs from "
                 f"{safe(snap['name'])} to {destination}.\n\n"
                 "One-time copy. SoulSync skips duplicate songs.",
                 [
@@ -653,7 +663,7 @@ class Controller:
         elif action == "results" and (sid := row["data"].get("search")):
             await self.search_results(fresh, sid, row["data"].get("search_page", 0))
         elif action in {"list", "home", "import"}:
-            await self.route(fresh, "spotify" if action == "import" else action, {})
+            await self.route(fresh, action, {})
 
 
 def build_application(

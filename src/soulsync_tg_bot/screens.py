@@ -35,7 +35,7 @@ def home() -> Screen:
         [
             [Button("My playlists", "list", style="primary")],
             [Button("Create playlist", "create")],
-            [Button("Import from Spotify", "spotify")],
+            [Button("Import playlist", "import")],
         ],
     )
 
@@ -96,7 +96,7 @@ def operation_result(row: Row) -> tuple[str, list[list[tuple[str, str]]]]:
     buttons: list[list[tuple[str, str]]] = []
     if status in {"queued", "starting"}:
         if kind.startswith("import_"):
-            return "Copying Spotify snapshot…", []
+            return "Copying playlist…", []
         return ("Starting sync &amp; download…" if kind == "pipeline" else "Saving playlist…"), []
     if kind == "pipeline":
         state = data.get("pipeline") or {}
