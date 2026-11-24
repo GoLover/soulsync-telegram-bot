@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/bot.sqlite3
+    volumes:
+      - bot-data:/data
+    networks:
+      - soulsync
+
+volumes:
+  bot-data:
+
+networks:
+  soulsync:
+    external: true
+    name: ${SOULSYNC_DOCKER_NETWORK:-soulsync_default}
